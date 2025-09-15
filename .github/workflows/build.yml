@@ -1,9 +1,9 @@
-name: Build Infinity APK (auto-detect)
+name: Build Infinity APK
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {}    # lánzalo a mano
   push:
-    branches: [ main ]
+    branches: [ main ]     # opcional
 
 permissions:
   contents: read
@@ -15,14 +15,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
-      - name: (Opcional) Sync con upstream
+      # Opcional: sincroniza tu fork con upstream para coger la última versión
+      - name: Sync with upstream (optional)
         run: |
           git remote add upstream https://github.com/Docile-Alligator/Infinity-For-Reddit.git || true
           git fetch upstream
-          git checkout main
+          git switch -c main || git switch main
           git merge --ff-only upstream/main || true
           git push origin main || true
 
@@ -33,58 +33,54 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Detectar rutas y versiones del proyecto
+      - name: Detect compileSdk/buildTools & API file
         id: detect
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "== Mostrar estructura relevante =="
-          ls -la
-          [ -d app ] && ls -la app || true
-          [ -f app/build.gradle ] && echo "[OK] app/build.gradle existe" || (echo "[!] Falta app/build.gradle" && exit 1)
+          # 1) Detección compileSdk y buildTools (Groovy o KTS)
+          FILE="app/build.gradle"
+          [ -f app/build.gradle.kts ] && FILE="app/build.gradle.kts"
 
-          echo "== Buscar APIUtils.java en el repo =="
+          COMPILE_SDK=$(grep -Eo 'compileSdk\s*\(?\s*[0-9]+' "$FILE" | grep -Eo '[0-9]+' | head -n1 || true)
+          [ -z "${COMPILE_SDK:-}" ] && COMPILE_SDK=34
+          echo "compileSdk=$COMPILE_SDK"
+
+          BUILD_TOOLS=$(grep -E 'buildToolsVersion' -m1 "$FILE" | sed -E 's/.*"(.*)".*/\1/' || true)
+          [ -z "${BUILD_TOOLS:-}" ] && BUILD_TOOLS="34.0.0"
+          echo "buildTools=$BUILD_TOOLS"
+
+          echo "COMPILE_SDK=$COMPILE_SDK" >> $GITHUB_OUTPUT
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> $GITHUB_OUTPUT
+
+          # 2) Localiza el archivo con USER_AGENT/CLIENT_ID
           API_FILE=$(git ls-files | grep -E 'APIUtils\.java$' || true)
-          if [ -z "${API_FILE}" ]; then
-            echo "[!] No se encontró APIUtils.java. Cambió de nombre o de carpeta."
-            echo "    Intenta localizar manualmente con: git grep -n 'USER_AGENT' o 'infinity://localhost'"
-            exit 1
+          if [ -z "$API_FILE" ]; then
+            API_FILE=$(git grep -l "USER_AGENT" -- app || true)
           fi
-          echo "API_FILE=${API_FILE}" >> $GITHUB_OUTPUT
-          echo "API_FILE: ${API_FILE}"
-
-          echo "== Extraer compileSdk y buildTools de app/build.gradle =="
-          COMPILE_SDK=$(grep -E 'compileSdk\s*[=:]\s*[0-9]+' -m1 app/build.gradle | grep -oE '[0-9]+' || true)
-          if [ -z "${COMPILE_SDK}" ]; then
-            # Gradle KTS o formato distinto
-            COMPILE_SDK=$(grep -E 'compileSdk\s*\(\s*[0-9]+' -m1 app/build.gradle | grep -oE '[0-9]+' || true)
+          if [ -z "$API_FILE" ]; then
+            echo "No se encontró APIUtils.java ni línea USER_AGENT"; exit 1
           fi
-          [ -z "${COMPILE_SDK}" ] && COMPILE_SDK=30   # fallback
-          echo "COMPILE_SDK=${COMPILE_SDK}" >> $GITHUB_OUTPUT
-          echo "compileSdk: ${COMPILE_SDK}"
+          echo "API_FILE=$API_FILE" >> $GITHUB_OUTPUT
+          echo "API_FILE=$API_FILE"
 
-          BUILD_TOOLS=$(grep -E 'buildToolsVersion' -m1 app/build.gradle | sed -E 's/.*"(.*)".*/\1/' || true)
-          [ -z "${BUILD_TOOLS}" ] && BUILD_TOOLS="30.0.3"  # fallback
-          echo "BUILD_TOOLS=${BUILD_TOOLS}" >> $GITHUB_OUTPUT
-          echo "buildToolsVersion: ${BUILD_TOOLS}"
-
-      - name: Instalar Android SDK requerido
+      - name: Install Android SDK (matching project)
+        shell: bash
         run: |
           set -euo pipefail
           ANDROID_HOME="$HOME/android-sdk"
           mkdir -p "$ANDROID_HOME/cmdline-tools/latest"
           curl -sSL -o cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
           unzip -q cmdtools.zip -d "$ANDROID_HOME/cmdline-tools/latest"
-
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
             "platforms;android-${{ steps.detect.outputs.COMPILE_SDK }}" \
             "build-tools;${{ steps.detect.outputs.BUILD_TOOLS }}" \
             "platform-tools"
-
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
 
-      - name: Inyectar API/UA/Redirect + Keystore
+      - name: Inject API/UA/Redirect + Keystore
         env:
           REDDIT_API_TOKEN: ${{ secrets.REDDIT_API_TOKEN }}
           REDDIT_USERNAME:  ${{ secrets.REDDIT_USERNAME }}
@@ -93,25 +89,30 @@ jobs:
           KEYSTORE_PASS:    ${{ secrets.KEYSTORE_PASS }}
           KEY_ALIAS:        ${{ secrets.KEY_ALIAS }}
           KEY_PASS:         ${{ secrets.KEY_PASS }}
+        shell: bash
         run: |
           set -euo pipefail
-
           API_FILE="${{ steps.detect.outputs.API_FILE }}"
-          if [ ! -f "$API_FILE" ]; then
-            echo "[!] No existe $API_FILE"; exit 1
-          fi
 
-          # Sustituciones (sin loguear secretos)
-          sed -i "s/NOe2iKrPPzwscA/${REDDIT_API_TOKEN}/g" "$API_FILE"
-          sed -i "s#infinity://localhost#${REDIRECT_URI}#g" "$API_FILE"
+          # Sustituye CLIENT_ID (nombre del campo puede variar; capturamos cualquiera que termine en CLIENT_ID)
+          sed -i -E 's/(public static final String [A-Z_]*CLIENT_ID\s*=\s*")[^"]*(";\s*)/\1'"${REDDIT_API_TOKEN//\//\\/}"'\2/' "$API_FILE" || true
+          # Fallback clásico por si el repo todavía lleva el literal antiguo:
+          sed -i "s/NOe2iKrPPzwscA/${REDDIT_API_TOKEN}/g" "$API_FILE" || true
+
+          # USER_AGENT
           UA="android:personal-app:0.0.1 (by /u/${REDDIT_USERNAME})"
-          sed -i 's/public static final String USER_AGENT = ".*";/public static final String USER_AGENT = "'"${UA//\//\\/}"'";/' "$API_FILE"
+          sed -i 's/public static final String USER_AGENT = ".*";/public static final String USER_AGENT = "'"${UA//\//\\/}"'";/' "$API_FILE" || true
+
+          # REDIRECT_URI (intentamos por clave; si no, sustituimos el literal típico)
+          sed -i -E 's|(public static final String REDIRECT_URI\s*=\s*")[^"]*(";\s*)|\1'"${REDIRECT_URI//\//\\/}"'\2|' "$API_FILE" || true
+          sed -i "s#infinity://localhost#${REDIRECT_URI}#g" "$API_FILE" || true
 
           # Keystore desde secret base64
           echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/Infinity.jks"
 
-          # Insertar signingConfig en app/build.gradle si no existe
+          # Inserta signingConfig release si falta
           GRADLE_FILE="app/build.gradle"
+          [ -f app/build.gradle.kts ] && GRADLE_FILE="app/build.gradle.kts"
           if ! grep -q 'signingConfigs' "$GRADLE_FILE"; then
             awk '
               BEGIN{ inserted=0 }
@@ -129,22 +130,19 @@ jobs:
                 next
               }
               { print }
-            ' "$GRADLE_FILE" > tmp.gradle && mv tmp.gradle "$GRADLE_FILE"
+            ' "$GRADLE_FILE" > tmp && mv tmp "$GRADLE_FILE"
           fi
-
-          if ! grep -q 'signingConfig signingConfigs.release' "$GRADLE_FILE"; then
+          grep -q 'signingConfig signingConfigs.release' "$GRADLE_FILE" || \
             sed -i '0,/release[[:space:]]*{/{s/release[[:space:]]*{/release {\n            signingConfig signingConfigs.release/}' "$GRADLE_FILE"
-          fi
 
-      - name: Build release (con logs útiles)
+      - name: Build release (no lint baseline)
+        shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew --no-daemon updateLintBaseline || true
           ./gradlew --no-daemon assembleRelease --stacktrace --info
 
-      - name: Subir APK
-        if: success()
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Infinity-Release-APK
