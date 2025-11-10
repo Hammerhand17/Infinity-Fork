@@ -93,7 +93,7 @@ jobs:
 
 
       # 🧩 Inyectar API, UA, Redirect y Keystore
-      - name: Inject credentials and keystore
+      - name: Inject API/UA/Redirect + Keystore
         env:
           REDDIT_API_TOKEN: ${{ secrets.REDDIT_API_TOKEN }}
           REDDIT_USERNAME:  ${{ secrets.REDDIT_USERNAME }}
@@ -105,46 +105,44 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          API_FILE="${{ steps.detect.outputs.API_FILE }}"
+          echo "🔧 Modificando APIUtils.java..."
 
-          echo "🔧 Modificando APIUtils.java -> $API_FILE"
-          sed -i -E 's/(public static final String [A-Z_]*CLIENT_ID\s*=\s*")[^"]*(";\s*)/\1'"${REDDIT_API_TOKEN//\//\\/}"'\2/' "$API_FILE" || true
+          API_FILE=$(git ls-files | grep -E 'APIUtils\.java$' | head -n1)
+          if [ -z "$API_FILE" ]; then
+            echo "❌ No se encontró APIUtils.java"
+            exit 1
+          fi
+
           sed -i "s/NOe2iKrPPzwscA/${REDDIT_API_TOKEN}/g" "$API_FILE" || true
-
-          UA="android:personal-app:0.0.1 (by /u/${REDDIT_USERNAME})"
-          sed -i 's/public static final String USER_AGENT = ".*";/public static final String USER_AGENT = "'"${UA//\//\\/}"'";/' "$API_FILE" || true
-
-          sed -i -E 's|(public static final String REDIRECT_URI\s*=\s*")[^"]*(";\s*)|\1'"${REDIRECT_URI//\//\\/}"'\2|' "$API_FILE" || true
           sed -i "s#infinity://localhost#${REDIRECT_URI}#g" "$API_FILE" || true
+          UA="android:personal-app:0.0.1 (by /u/${REDDIT_USERNAME})"
+          sed -i "s|public static final String USER_AGENT = \".*\";|public static final String USER_AGENT = \"${UA}\";|" "$API_FILE"
 
+          echo "🗝️ Decodificando keystore..."
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "❌ Falta secret KEYSTORE_BASE64"
+            exit 1
+          fi
           echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/Infinity.jks"
 
           GRADLE_FILE="app/build.gradle"
           [ -f app/build.gradle.kts ] && GRADLE_FILE="app/build.gradle.kts"
 
-          echo "🔒 Añadiendo configuración de firma..."
-          if ! grep -q 'signingConfigs' "$GRADLE_FILE"; then
-            awk '
-              BEGIN{ inserted=0 }
-              /buildTypes[[:space:]]*\{/ && inserted==0 {
-                print "    signingConfigs {"
-                print "        release {"
-                print "            storeFile file(\"" ENVIRON["GITHUB_WORKSPACE"] "/Infinity.jks\")"
-                print "            storePassword \"" ENVIRON["KEYSTORE_PASS"] "\""
-                print "            keyAlias \"" ENVIRON["KEY_ALIAS"] "\""
-                print "            keyPassword \"" ENVIRON["KEY_PASS"] "\""
-                print "        }"
-                print "    }"
-                print
-                inserted=1
-                next
-              }
-              { print }
-            ' "$GRADLE_FILE" > tmp && mv tmp "$GRADLE_FILE"
-          fi
+          echo "🔏 Ajustando bloque de firma en $GRADLE_FILE..."
 
+          # Si ya existe signingConfigs.release, elimínalo y reemplázalo limpio
+          awk '
+            BEGIN{ skip=0 }
+            /signingConfigs\s*\{/ {print "    signingConfigs {"; print "        release {"; print "            storeFile file(\"" ENVIRON["GITHUB_WORKSPACE"] "/Infinity.jks\")"; print "            storePassword \"" ENVIRON["KEYSTORE_PASS"] "\""; print "            keyAlias \"" ENVIRON["KEY_ALIAS"] "\""; print "            keyPassword \"" ENVIRON["KEY_PASS"] "\""; print "        }"; print "    }"; skip=1; next}
+            skip && /\}/ { skip=0; next }
+            !skip { print }
+          ' "$GRADLE_FILE" > tmp && mv tmp "$GRADLE_FILE"
+
+          # Garantiza que buildTypes.release tenga la referencia correcta
           grep -q 'signingConfig signingConfigs.release' "$GRADLE_FILE" || \
-            sed -i '0,/release[[:space:]]*{/s/release[[:space:]]*{/release {\n            signingConfig signingConfigs.release/' "$GRADLE_FILE"
+            sed -i '0,/release[[:space:]]*{/{s/release[[:space:]]*{/release {\n            signingConfig signingConfigs.release/}' "$GRADLE_FILE"
+
+          echo "✅ Bloque de firma configurado correctamente."
 
       # ⚙️ Compilar APK
       - name: Build release
