@@ -82,7 +82,7 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
 
-      - name: Inject API/UA/Redirect + Keystore (robust)
+            - name: Inject API/UA/Redirect + Keystore (fixed order)
         env:
           REDDIT_API_TOKEN: ${{ secrets.REDDIT_API_TOKEN }}
           REDDIT_USERNAME:  ${{ secrets.REDDIT_USERNAME }}
@@ -108,26 +108,18 @@ jobs:
           sed -i "s|public static final String USER_AGENT = \".*\";|public static final String USER_AGENT = \"${UA}\";|" "$API_FILE"
 
           echo "🗝️ Decodificando keystore..."
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "❌ Falta secret KEYSTORE_BASE64"
-            exit 1
-          fi
           echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/Infinity.jks"
 
           GRADLE_FILE="app/build.gradle"
           [ -f app/build.gradle.kts ] && GRADLE_FILE="app/build.gradle.kts"
 
-          echo "🔏 Ajustando bloque de firma en $GRADLE_FILE..."
+          echo "🔏 Insertando bloque signingConfigs antes de buildTypes..."
 
-          # 1️⃣ Elimina bloque signingConfigs anterior si existe
-          perl -0777 -pe 'if (m/signingConfigs\s*\{[^}]*release\s*\{[^}]*\}[^}]*\}/s) { s/signingConfigs\s*\{[^}]*release\s*\{[^}]*\}[^}]*\}//s }' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
-
-          # 2️⃣ Inserta bloque limpio justo después de android {
-          awk -v KSP="$GITHUB_WORKSPACE/Infinity.jks" -v KP="$KEYSTORE_PASS" -v KA="$KEY_ALIAS" -v KPW="$KEY_PASS" '
-            BEGIN{inserted=0}
+          awk -v KSP="$GITHUB_WORKSPACE/Infinity.jks" \
+              -v KP="$KEYSTORE_PASS" -v KA="$KEY_ALIAS" -v KPW="$KEY_PASS" '
+            BEGIN { done=0 }
             {
-              if(!inserted && $0 ~ /^[[:space:]]*android[[:space:]]*\{/){
-                print;
+              if (!done && $0 ~ /^[[:space:]]*buildTypes[[:space:]]*\{/ ) {
                 print "    signingConfigs {"
                 print "        release {"
                 print "            storeFile file(\"" KSP "\")"
@@ -136,26 +128,16 @@ jobs:
                 print "            keyPassword \"" KPW "\""
                 print "        }"
                 print "    }"
-                inserted=1
-                next
+                done=1
               }
               print
             }' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
 
-          # 3️⃣ Garantiza que buildTypes.release use esa firma
-          if ! grep -q "signingConfig signingConfigs.release" "$GRADLE_FILE"; then
-            awk '
-              BEGIN{added=0}
-              {
-                print $0
-                if(!added && $0 ~ /^[[:space:]]*release[[:space:]]*{/){
-                  print "            signingConfig signingConfigs.release"
-                  added=1
-                }
-              }' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
-          fi
+          echo "🧩 Vinculando buildTypes.release a la firma..."
+          sed -i '0,/release[[:space:]]*{/s//release {\n            signingConfig signingConfigs.release/' "$GRADLE_FILE"
 
-          echo "✅ Bloque de firma configurado con éxito."
+          echo "✅ Bloque de firma insertado y vinculado correctamente."
+
 
       - name: Build release
         shell: bash
