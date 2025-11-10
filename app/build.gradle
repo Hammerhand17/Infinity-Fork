@@ -20,10 +20,10 @@ android {
         }
     }
 
-    // 🔏 Bloque de firma insertado correctamente
+    // 🔏 Bloque de firma (referencias dinámicas sustituidas en GitHub Actions)
     signingConfigs {
         release {
-            // ⚠️ Estos valores serán sobrescritos por tu workflow de GitHub Actions
+            // Estos valores serán reemplazados automáticamente por el workflow
             storeFile file("../../Infinity.jks")
             storePassword "Infinity"
             keyAlias "Infinity"
@@ -37,6 +37,7 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+
         minifiedRelease {
             initWith buildTypes.release
             zipAlignEnabled true
@@ -44,6 +45,7 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
+
         debug {
             applicationIdSuffix '.debug'
             versionNameSuffix ' (DEBUG)'
