@@ -1,9 +1,9 @@
 name: Build Infinity Private
 
 on:
-  workflow_dispatch: {}        # Lanzable a mano
+  workflow_dispatch: {}
   push:
-    branches: [ main ]         # También al hacer push a main
+    branches: [ main ]
 
 permissions:
   contents: read
@@ -13,13 +13,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Clonar el repositorio
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2️⃣ (Opcional) Sincronizar tu fork con el original
       - name: Sync with upstream (optional)
         run: |
           git remote add upstream https://github.com/Docile-Alligator/Infinity-For-Reddit.git || true
@@ -28,7 +26,6 @@ jobs:
           git merge --ff-only upstream/main || true
           git push origin main || true
 
-      # 3️⃣ Instalar Java 17
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -36,7 +33,6 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      # 4️⃣ Detectar compileSdk, buildTools y archivo APIUtils.java
       - name: Detect SDK info
         id: detect
         shell: bash
@@ -44,15 +40,12 @@ jobs:
           set -euo pipefail
           FILE="app/build.gradle"
           [ -f app/build.gradle.kts ] && FILE="app/build.gradle.kts"
-
           COMPILE_SDK=$(grep -Eo 'compileSdk\s*\(?\s*[0-9]+' "$FILE" | grep -Eo '[0-9]+' | head -n1 || true)
           [ -z "${COMPILE_SDK:-}" ] && COMPILE_SDK=34
           BUILD_TOOLS=$(grep -E 'buildToolsVersion' -m1 "$FILE" | sed -E 's/.*"(.*)".*/\1/' || true)
           [ -z "${BUILD_TOOLS:-}" ] && BUILD_TOOLS="34.0.0"
-
           echo "COMPILE_SDK=$COMPILE_SDK" >> $GITHUB_OUTPUT
           echo "BUILD_TOOLS=$BUILD_TOOLS" >> $GITHUB_OUTPUT
-
           API_FILE=$(git ls-files | grep -E 'APIUtils\.java$' || true)
           if [ -z "$API_FILE" ]; then
             API_FILE=$(git grep -l "USER_AGENT" -- app || true)
@@ -61,22 +54,18 @@ jobs:
             echo "❌ No se encontró APIUtils.java"; exit 1
           fi
           echo "API_FILE=$API_FILE" >> $GITHUB_OUTPUT
-          echo "API_FILE=$API_FILE"
 
-      # 5️⃣ Instalar Android SDK sin fallo de licencias
       - name: Install Android SDK (robust)
         shell: bash
         run: |
           set -euo pipefail
           ANDROID_HOME="$HOME/android-sdk"
           mkdir -p "$ANDROID_HOME"
-
           echo "⬇️ Descargando Command Line Tools..."
           curl -sSL -o cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
           unzip -q cmdtools.zip -d "$ANDROID_HOME"
           mkdir -p "$ANDROID_HOME/cmdline-tools/latest"
           mv "$ANDROID_HOME/cmdline-tools"/* "$ANDROID_HOME/cmdline-tools/latest/" || true
-
           echo "📜 Aceptando licencias..."
           {
             echo y
@@ -84,20 +73,16 @@ jobs:
             echo y
             echo y
           } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
-
           echo "📦 Instalando SDK Platform y Build-Tools..."
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
             "platforms;android-${{ steps.detect.outputs.COMPILE_SDK }}" \
             "build-tools;${{ steps.detect.outputs.BUILD_TOOLS }}" \
             "platform-tools" || true
-
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          echo "✅ SDK instalado correctamente."
 
-          echo "✅ SDK instalado correctamente sin errores de licencias."
-
-      # 6️⃣ Inyectar API, usuario, redirect y keystore
-      - name: Inject API/UA/Redirect + Keystore (fixed order)
+      - name: Inject API/UA/Redirect + Keystore (safe insertion)
         env:
           REDDIT_API_TOKEN: ${{ secrets.REDDIT_API_TOKEN }}
           REDDIT_USERNAME:  ${{ secrets.REDDIT_USERNAME }}
@@ -110,13 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "🔧 Modificando APIUtils.java..."
-
           API_FILE=$(git ls-files | grep -E 'APIUtils\.java$' | head -n1)
-          if [ -z "$API_FILE" ]; then
-            echo "❌ No se encontró APIUtils.java"
-            exit 1
-          fi
-
           sed -i "s/NOe2iKrPPzwscA/${REDDIT_API_TOKEN}/g" "$API_FILE" || true
           sed -i "s#infinity://localhost#${REDIRECT_URI}#g" "$API_FILE" || true
           UA="android:personal-app:0.0.1 (by /u/${REDDIT_USERNAME})"
@@ -126,14 +105,13 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/Infinity.jks"
 
           GRADLE_FILE="app/build.gradle"
-          [ -f app/build.gradle.kts ] && GRADLE_FILE="app/build.gradle.kts"
-
-          echo "🔏 Insertando bloque signingConfigs antes de buildTypes..."
+          echo "🔏 Insertando bloque signingConfigs dentro de android {...}"
           awk -v KSP="$GITHUB_WORKSPACE/Infinity.jks" \
               -v KP="$KEYSTORE_PASS" -v KA="$KEY_ALIAS" -v KPW="$KEY_PASS" '
-            BEGIN { done=0 }
-            {
-              if (!done && $0 ~ /^[[:space:]]*buildTypes[[:space:]]*\{/ ) {
+            BEGIN { inserted=0 }
+            /android\s*\{/ {
+              print $0
+              if (!inserted) {
                 print "    signingConfigs {"
                 print "        release {"
                 print "            storeFile file(\"" KSP "\")"
@@ -142,17 +120,18 @@ jobs:
                 print "            keyPassword \"" KPW "\""
                 print "        }"
                 print "    }"
-                done=1
+                inserted=1
               }
-              print
-            }' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
+              next
+            }
+            { print }
+          ' "$GRADLE_FILE" > "$GRADLE_FILE.tmp" && mv "$GRADLE_FILE.tmp" "$GRADLE_FILE"
 
           echo "🧩 Vinculando buildTypes.release a la firma..."
           sed -i '0,/release[[:space:]]*{/s//release {\n            signingConfig signingConfigs.release/' "$GRADLE_FILE"
 
-          echo "✅ Bloque de firma insertado y vinculado correctamente."
+          echo "✅ Bloque de firma correctamente insertado dentro de android{}."
 
-      # 7️⃣ Compilar el APK
       - name: Build release
         shell: bash
         run: |
@@ -160,7 +139,6 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleRelease --stacktrace --info
 
-      # 8️⃣ Subir el artefacto final
       - name: Upload APK (private)
         uses: actions/upload-artifact@v4
         with:
