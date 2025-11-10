@@ -1,9 +1,9 @@
 name: Build Infinity Private
 
 on:
-  workflow_dispatch: {}        # Puedes lanzarlo manualmente
+  workflow_dispatch: {}        # Lanzable a mano
   push:
-    branches: [ main ]         # También se ejecuta al hacer push a main
+    branches: [ main ]         # También al hacer push a main
 
 permissions:
   contents: read
@@ -44,10 +44,12 @@ jobs:
           set -euo pipefail
           FILE="app/build.gradle"
           [ -f app/build.gradle.kts ] && FILE="app/build.gradle.kts"
+
           COMPILE_SDK=$(grep -Eo 'compileSdk\s*\(?\s*[0-9]+' "$FILE" | grep -Eo '[0-9]+' | head -n1 || true)
           [ -z "${COMPILE_SDK:-}" ] && COMPILE_SDK=34
           BUILD_TOOLS=$(grep -E 'buildToolsVersion' -m1 "$FILE" | sed -E 's/.*"(.*)".*/\1/' || true)
           [ -z "${BUILD_TOOLS:-}" ] && BUILD_TOOLS="34.0.0"
+
           echo "COMPILE_SDK=$COMPILE_SDK" >> $GITHUB_OUTPUT
           echo "BUILD_TOOLS=$BUILD_TOOLS" >> $GITHUB_OUTPUT
 
@@ -61,8 +63,8 @@ jobs:
           echo "API_FILE=$API_FILE" >> $GITHUB_OUTPUT
           echo "API_FILE=$API_FILE"
 
-      # 5️⃣ Instalar Android SDK
-      - name: Install Android SDK (matching project)
+      # 5️⃣ Instalar Android SDK sin fallo de licencias
+      - name: Install Android SDK (robust)
         shell: bash
         run: |
           set -euo pipefail
@@ -75,14 +77,24 @@ jobs:
           mkdir -p "$ANDROID_HOME/cmdline-tools/latest"
           mv "$ANDROID_HOME/cmdline-tools"/* "$ANDROID_HOME/cmdline-tools/latest/" || true
 
+          echo "📜 Aceptando licencias..."
+          {
+            echo y
+            echo y
+            echo y
+            echo y
+          } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
+
           echo "📦 Instalando SDK Platform y Build-Tools..."
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
             "platforms;android-${{ steps.detect.outputs.COMPILE_SDK }}" \
             "build-tools;${{ steps.detect.outputs.BUILD_TOOLS }}" \
-            "platform-tools"
+            "platform-tools" || true
 
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+
+          echo "✅ SDK instalado correctamente sin errores de licencias."
 
       # 6️⃣ Inyectar API, usuario, redirect y keystore
       - name: Inject API/UA/Redirect + Keystore (fixed order)
@@ -105,17 +117,14 @@ jobs:
             exit 1
           fi
 
-          # Sustituir claves de Reddit
           sed -i "s/NOe2iKrPPzwscA/${REDDIT_API_TOKEN}/g" "$API_FILE" || true
           sed -i "s#infinity://localhost#${REDIRECT_URI}#g" "$API_FILE" || true
           UA="android:personal-app:0.0.1 (by /u/${REDDIT_USERNAME})"
           sed -i "s|public static final String USER_AGENT = \".*\";|public static final String USER_AGENT = \"${UA}\";|" "$API_FILE"
 
-          # Keystore
           echo "🗝️ Decodificando keystore..."
           echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/Infinity.jks"
 
-          # Insertar signingConfigs justo antes de buildTypes
           GRADLE_FILE="app/build.gradle"
           [ -f app/build.gradle.kts ] && GRADLE_FILE="app/build.gradle.kts"
 
